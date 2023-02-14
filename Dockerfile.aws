@@ -1,0 +1,71 @@
+# Pull official base image
+ARG BASE_IMAGE=python:3.8-slim-bullseye
+
+# Image for common sysdeps
+FROM ${BASE_IMAGE} AS deeps
+
+## Install build deps
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        # System deps \
+        htop curl \
+    # Clear any trash
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# Add lambda runtime interface emulator
+ADD https://github.com/aws/aws-lambda-runtime-interface-emulator/releases/latest/download/aws-lambda-rie /usr/bin/aws-lambda-rie
+RUN chmod 755 /usr/bin/aws-lambda-rie
+
+# Build python deeps
+FROM ${BASE_IMAGE} AS build
+
+## Install build deps
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        git
+
+WORKDIR /home/worker
+
+# Copy deeps file
+COPY Pipfile.lock ./
+
+RUN python -m venv ./venv \
+    && . ./venv/bin/activate \
+    && pip install --upgrade pip setuptools \
+    && pip install pipenv \
+    && pipenv sync \
+    # AWS Lambda Python Runtime Interface Client
+    && pipenv install awslambdaric \
+    && pipenv graph
+
+
+# Runner image
+FROM deeps
+
+# AS ROOT
+RUN addgroup --system worker && adduser --disabled-password --system --group worker
+
+WORKDIR /home/worker
+
+# AS USER
+USER worker
+
+# Copy python deeps to workdir
+COPY --chown=worker:worker --from=build /home/worker/venv ./venv
+# Copy bootstrap scripts workdir
+COPY --chown=worker:worker entrypoint.sh ./entrypoint.sh
+# Copy app content to workdir
+COPY --chown=worker:worker django_lambda/. .
+
+# Fix permissions
+RUN chmod +x /home/worker/entrypoint.sh
+
+# Run bootstrap script
+ENTRYPOINT ["/home/worker/entrypoint.sh"]
+
+HEALTHCHECK --interval=60s --timeout=1s --start-period=5s --retries=3 CMD curl -LSsf http://localhost/api/status
+
+# Set the CMD to your handler (could also be done as a parameter override outside of the Dockerfile)
+CMD ["app.asgi.handler"]
+#CMD ["app.lambda_handler.handler"]
